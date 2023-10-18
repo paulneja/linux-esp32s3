@@ -32,6 +32,7 @@
 #include <linux/init.h>
 #include <linux/elf.h>
 #include <linux/elf-fdpic.h>
+#include <linux/sysctl.h>
 #include <linux/elfcore.h>
 #include <linux/coredump.h>
 #include <linux/dax.h>
@@ -87,8 +88,25 @@ static struct linux_binfmt elf_fdpic_format = {
 #endif
 };
 
+unsigned long default_stack_size = 131072UL;
+
+#ifdef CONFIG_SYSCTL
+static const struct ctl_table fdpic_sysctl_table[] = {
+	{
+		.procname	= "default_stack_size",
+		.data		= &default_stack_size,
+		.maxlen		= sizeof(unsigned long),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+};
+#endif
+
 static int __init init_elf_fdpic_binfmt(void)
 {
+#ifdef CONFIG_SYSCTL
+	register_sysctl_init("kernel", fdpic_sysctl_table);
+#endif
 	register_binfmt(&elf_fdpic_format);
 	return 0;
 }
@@ -336,7 +354,7 @@ static int load_elf_fdpic_binary(struct linux_binprm *bprm)
 
 	retval = -ENOEXEC;
 	if (stack_size == 0)
-		stack_size = 131072UL; /* same as exec.c's default commit */
+		stack_size = default_stack_size; /* same as exec.c's default commit */
 
 	if (is_constdisp(&interp_params.hdr))
 		interp_params.flags |= ELF_FDPIC_FLAG_CONSTDISP;
