@@ -488,6 +488,8 @@ int esp_add_card(struct esp_adapter *adapter)
 	RET_ON_FAIL(esp_add_wiphy(adapter));
 	RET_ON_FAIL(esp_add_network_ifaces(adapter));
 
+	esp_ble_prov_init(adapter);
+
 	return 0;
 }
 
@@ -579,6 +581,7 @@ int esp_remove_card(struct esp_adapter *adapter)
 	esp_stop_network_ifaces(adapter);
 #ifdef CONFIG_ESP32_BT
 	/* BT may have been initialized after fw bootup event, deinit it */
+	esp_ble_prov_deinit();
 	esp_deinit_bt(adapter);
 #endif
 	esp_commands_teardown(adapter);
@@ -789,6 +792,9 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 			dev_kfree_skb_any(skb);
 		}
 
+	} else if (payload_header->if_type == ESP_BLE_PROV_IF) {
+		esp_ble_prov_rx(skb);
+		return;
 	} else if (payload_header->if_type == ESP_TEST_IF) {
 #if TEST_RAW_TP
 		if (raw_tp_mode != 0) {
