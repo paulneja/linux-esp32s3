@@ -14,6 +14,9 @@
 #include <linux/vmstat.h>
 #include <linux/atomic.h>
 #include <linux/vmalloc.h>
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+#include <linux/nommu-bank.h>
+#endif
 #ifdef CONFIG_CMA
 #include <linux/cma.h>
 #endif
@@ -60,6 +63,10 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "MemTotal:       ", i.totalram);
 	show_val_kb(m, "MemFree:        ", i.freeram);
 	show_val_kb(m, "MemAvailable:   ", available);
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	show_val_kb(m, "ForkShadow:     ", atomic_long_read(&nommu_bank_shadow_pages));
+	show_val_kb(m, "ForkRecovered:  ", atomic_long_read(&nommu_bank_recovered_pages));
+#endif
 	show_val_kb(m, "Buffers:        ", i.bufferram);
 	show_val_kb(m, "Cached:         ", cached);
 	show_val_kb(m, "SwapCached:     ", total_swapcache_pages());

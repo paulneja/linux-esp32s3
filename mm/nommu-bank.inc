@@ -1,20 +1,36 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Included by nommu.c: experimental UP, eager-copy fork backend. */
+#include <linux/sched/signal.h>
 #define NOMMU_BANK_MAX_BYTES (512UL * 1024)
 #define BANK_GFP (GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN)
 
 struct nommu_bank {
 	struct list_head link;
+	struct list_head siblings;
 	struct vm_region *region;
 	unsigned int count;
 	void *pages[];
 };
 
-static void bank_free(struct nommu_bank *bank)
+atomic_long_t nommu_bank_shadow_pages = ATOMIC_LONG_INIT(0);
+atomic_long_t nommu_bank_recovered_pages = ATOMIC_LONG_INIT(0);
+
+/* A single-owner descriptor survives, but owns no backup pages. Keeping
+ * that descriptor stable matters when another mm exits while fork sleeps
+ * in bank_alloc(). Only the owning mm can replace its descriptor.
+ */
+static void bank_release_pages(struct nommu_bank *bank)
 {
 	unsigned int i;
 	for (i = 0; i < bank->count; i++)
 		free_page((unsigned long)bank->pages[i]);
+	atomic_long_sub(bank->count, &nommu_bank_shadow_pages);
+	bank->count = 0;
+}
+
+static void bank_free(struct nommu_bank *bank)
+{
+	bank_release_pages(bank);
 	kfree(bank);
 }
 
@@ -27,6 +43,7 @@ static struct nommu_bank *bank_alloc(struct vm_region *region)
 	if (!bank)
 		return NULL;
 	INIT_LIST_HEAD(&bank->link);
+	INIT_LIST_HEAD(&bank->siblings);
 	bank->region = region;
 	for (i = 0; i < count; i++) {
 		bank->pages[i] = (void *)__get_free_page(BANK_GFP);
@@ -35,6 +52,7 @@ static struct nommu_bank *bank_alloc(struct vm_region *region)
 			return NULL;
 		}
 		bank->count++;
+		atomic_long_inc(&nommu_bank_shadow_pages);
 	}
 	return bank;
 }
@@ -80,9 +98,27 @@ static void bank_detach(struct vm_area_struct *vma)
 	if (!bank)
 		return;
 	local_irq_save(flags);
-	list_del(&bank->link);
+	list_del_init(&bank->link);
 	if (bank->region->bank_owner == bank)
 		bank->region->bank_owner = NULL;
+	if (!list_empty(&bank->siblings)) {
+		struct nommu_bank *last = list_next_entry(bank, siblings);
+
+		list_del_init(&bank->siblings);
+		if (list_empty(&last->siblings)) {
+			/* The departing process may still be resident. Restore the
+			 * survivor before discarding its only valid saved state.
+			 * UP only: free_page/kfree do not sleep; IRQ exclusion also
+			 * protects the switch list and a concurrent clone's checks.
+			 */
+			if (last->region->bank_owner != last)
+				bank_copy(last, false);
+			last->region->bank_owner = last;
+			list_del_init(&last->link);
+			atomic_long_add(last->count, &nommu_bank_recovered_pages);
+			bank_release_pages(last);
+		}
+	}
 	vma->nommu_bank = NULL;
 	local_irq_restore(flags);
 	bank_free(bank);
@@ -91,20 +127,25 @@ static void bank_detach(struct vm_area_struct *vma)
 static int bank_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
 {
 	struct vm_region *region = src->vm_region;
-	struct nommu_bank *parent = src->nommu_bank, *child;
+	struct nommu_bank *parent, *child, *old = NULL;
 	unsigned long flags;
-	bool fresh = !parent;
+	bool fresh;
 
-	if (fresh) {
-		parent = bank_alloc(region);
-		if (!parent)
-			return -ENOMEM;
-	}
+	/* Allocate the child first: sleeping here can let the last sibling
+	 * exit and release the parent's shadows. Recheck AFTER allocation.
+	 */
 	child = bank_alloc(region);
-	if (!child) {
-		if (fresh)
-			bank_free(parent);
+	if (!child)
 		return -ENOMEM;
+	parent = src->nommu_bank;
+	fresh = !parent || !parent->count;
+	if (fresh) {
+		old = parent;
+		parent = bank_alloc(region);
+		if (!parent) {
+			bank_free(child);
+			return -ENOMEM;
+		}
 	}
 	local_irq_save(flags);
 	if (fresh) {
@@ -115,9 +156,23 @@ static int bank_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
 	/* The calling process is resident, even if allocation scheduled. */
 	bank_copy(child, true);
 	dst->nommu_bank = child;
+	list_add_tail(&child->siblings, &parent->siblings);
 	list_add_tail(&child->link, &dst->vm_mm->context.nommu_banks);
 	local_irq_restore(flags);
+	if (old)
+		bank_free(old);
 	return 0;
+}
+
+unsigned long nommu_bank_pages(struct mm_struct *mm)
+{
+	struct nommu_bank *bank;
+	unsigned long flags, pages = 0;
+	local_irq_save(flags);
+	list_for_each_entry(bank, &mm->context.nommu_banks, link)
+		pages += bank->count;
+	local_irq_restore(flags);
+	return pages;
 }
 
 int nommu_bank_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
@@ -128,9 +183,26 @@ int nommu_bank_dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	unsigned long bytes = 0, addr;
 	int ret;
 
-	/* No multi-threaded fork or asynchronously pinned private memory yet. */
-	if (atomic_read(&oldmm->mm_users) != 1)
-		return -EOPNOTSUPP;
+	/* mm_users also includes temporary /proc and ptrace references. They
+	 * are not extra executing threads. Reject actual CLONE_VM users only.
+	 * Holding mmap_lock already serializes readers of the VMA layout.
+	 */
+	if (atomic_read(&oldmm->mm_users) > 1) {
+		struct task_struct *group, *task;
+		bool shared = false;
+
+		rcu_read_lock();
+		for_each_process_thread(group, task) {
+			if (task != current && READ_ONCE(task->mm) == oldmm) {
+				shared = true;
+				goto checked_users;
+			}
+		}
+checked_users:
+		rcu_read_unlock();
+		if (shared)
+			return -EOPNOTSUPP;
+	}
 	for_each_vma(src_iter, src) {
 		if (src->vm_flags & VM_SHARED)
 			continue;

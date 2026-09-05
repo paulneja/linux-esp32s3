@@ -9,6 +9,9 @@
 #include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <linux/sched/mm.h>
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+#include <linux/nommu-bank.h>
+#endif
 
 #include "internal.h"
 
@@ -24,12 +27,20 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 	struct vm_area_struct *vma;
 	struct vm_region *region;
 	unsigned long bytes = 0, sbytes = 0, slack = 0, size;
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	unsigned long private_ram = 0;
+#endif
 
 	mmap_read_lock(mm);
 	for_each_vma(vmi, vma) {
 		bytes += kobjsize(vma);
 
 		region = vma->vm_region;
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+		if (region && !(vma->vm_flags & VM_SHARED) &&
+		    (vma->vm_flags & VM_MAPPED_COPY))
+			private_ram += region->vm_top - region->vm_start;
+#endif
 		if (region) {
 			size = kobjsize(region);
 			size += region->vm_end - region->vm_start;
@@ -69,6 +80,10 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 
 	bytes += kobjsize(current); /* includes kernel stack */
 
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	seq_printf(m, "ForkShadow:\t%8lu kB\n", nommu_bank_pages(mm) << (PAGE_SHIFT - 10));
+	seq_printf(m, "PrivateRAM:\t%8lu kB\n", private_ram >> 10);
+#endif
 	mmap_read_unlock(mm);
 
 	seq_printf(m,
@@ -293,4 +308,3 @@ const struct file_operations proc_pid_maps_operations = {
 	.llseek		= seq_lseek,
 	.release	= map_release,
 };
-
