@@ -703,6 +703,9 @@ typedef struct { unsigned long v; } freeptr_t;
  * map parts of them.
  */
 struct vm_region {
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	struct nommu_bank *bank_owner;
+#endif
 	struct rb_node	vm_rb;		/* link in global region tree */
 	vm_flags_t	vm_flags;	/* VMA vm_flags */
 	unsigned long	vm_start;	/* start address of region */
@@ -988,6 +991,9 @@ struct vm_area_struct {
 #endif
 #ifndef CONFIG_MMU
 	struct vm_region *vm_region;	/* NOMMU mapping region */
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	struct nommu_bank *nommu_bank;
+#endif
 #endif
 #ifdef CONFIG_NUMA
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */

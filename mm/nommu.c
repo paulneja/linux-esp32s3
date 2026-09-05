@@ -613,8 +613,15 @@ static int delete_vma_from_mm(struct vm_area_struct *vma)
 /*
  * destroy a VMA record
  */
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+#include "nommu-bank.inc"
+#endif
+
 static void delete_vma(struct mm_struct *mm, struct vm_area_struct *vma)
 {
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	bank_detach(vma);
+#endif
 	vma_close(vma);
 	if (vma->vm_file)
 		fput(vma->vm_file);
@@ -1320,6 +1327,12 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	 * only a single usage on the region) */
 	if (vma->vm_file)
 		return -ENOMEM;
+	if (vma->vm_region->vm_usage != 1)
+		return -EBUSY;
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	if (vma->nommu_bank)
+		return -EOPNOTSUPP;
+#endif
 
 	mm = vma->vm_mm;
 	if (mm->map_count >= get_sysctl_max_map_count())
@@ -1391,6 +1404,12 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
 		      unsigned long from, unsigned long to)
 {
 	struct vm_region *region;
+	if (vma->vm_region->vm_usage != 1)
+		return -EBUSY;
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	if (vma->nommu_bank)
+		return -EOPNOTSUPP;
+#endif
 
 	/* adjust the VMA's pointers, which may reposition it in the MM's tree
 	 * and list */
@@ -1660,6 +1679,15 @@ static int __access_remote_vm(struct mm_struct *mm, unsigned long addr,
 			len = vma->vm_end - addr;
 
 		/* only read or write mappings where it is permitted */
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+		if (vma->nommu_bank) {
+			if ((write && (vma->vm_flags & VM_MAYWRITE)) ||
+			    (!write && (vma->vm_flags & VM_MAYREAD)))
+				bank_access(vma, addr, buf, len, write);
+			else
+				len = 0;
+		} else
+#endif
 		if (write && vma->vm_flags & VM_MAYWRITE)
 			copy_to_user_page(vma, NULL, addr,
 					 (void *) addr, buf, len);
@@ -1901,8 +1929,15 @@ subsys_initcall(init_admin_reserve);
 
 int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 {
+	int ret = 0;
+
 	mmap_write_lock(oldmm);
 	dup_mm_exe_file(mm, oldmm);
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	mmap_write_lock_nested(mm, SINGLE_DEPTH_NESTING);
+	ret = nommu_bank_dup_mmap(mm, oldmm);
+	mmap_write_unlock(mm);
+#endif
 	mmap_write_unlock(oldmm);
-	return 0;
+	return ret;
 }

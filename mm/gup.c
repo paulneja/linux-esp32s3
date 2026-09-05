@@ -2012,6 +2012,11 @@ static long __get_user_pages_locked(struct mm_struct *mm, unsigned long start,
 		if (!vma)
 			break;
 
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+		/* Resident bank bytes can change owner after this task sleeps. */
+		if (pages && vma->nommu_bank)
+			break;
+#endif
 		/* protect what we can, including chardevs */
 		if ((vma->vm_flags & (VM_IO | VM_PFNMAP)) ||
 		    !(vm_flags & vma->vm_flags))

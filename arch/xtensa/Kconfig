@@ -441,6 +441,14 @@ config XTENSA_PLATFORM_XTFPGA
 
 endchoice
 
+config XTENSA_NOMMU_FORK
+	bool "Experimental NOMMU fork memory banks"
+	depends on XTENSA_PLATFORM_ESP32 && !MMU && !SMP
+	help
+	  Duplicate private user memory into page-sized software banks and
+	  restore it on context switches. This is experimental, not memory
+	  protection. Partial unmap and pinned private mappings are unsupported.
+
 config PLATFORM_NR_IRQS
 	int
 	default 3 if XTENSA_PLATFORM_XT2000

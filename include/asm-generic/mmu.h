@@ -7,8 +7,14 @@
  * Architectures with an MMU need something more complex.
  */
 #ifndef __ASSEMBLY__
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+#include <linux/list.h>
+#endif
 typedef struct {
 	unsigned long		end_brk;
+#ifdef CONFIG_XTENSA_NOMMU_FORK
+	struct list_head nommu_banks;
+#endif
 
 #ifdef CONFIG_BINFMT_ELF_FDPIC
 	unsigned long		exec_fdpic_loadmap;
