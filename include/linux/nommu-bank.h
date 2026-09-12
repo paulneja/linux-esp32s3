@@ -4,6 +4,8 @@
 #include <linux/atomic.h>
 extern atomic_long_t nommu_bank_shadow_pages;
 extern atomic_long_t nommu_bank_recovered_pages;
+extern unsigned long nommu_bank_switch_max_cycles;
+extern unsigned long nommu_bank_switch_last_cycles;
 struct mm_struct;
 struct vm_area_struct;
 void nommu_bank_switch(struct mm_struct *mm);

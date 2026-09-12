@@ -105,6 +105,17 @@ static void bank_report_broken(const char *where)
 	dump_stack();
 }
 
+/* How long a context switch spends with interrupts disabled, in CPU cycles.
+ * This is the number that decides how large fork_bank_max_bytes may safely
+ * be: a switch between two banked processes exchanges every banked page with
+ * interrupts off, so the timer tick, the shmem IPC interrupt and the UART all
+ * wait for it. Reported in /proc/meminfo as ForkSwitchMax, in microseconds at
+ * the nominal 240 MHz; write anything to /proc/sys/vm/fork_bank_reset_max to
+ * clear it before a measurement.
+ */
+unsigned long nommu_bank_switch_max_cycles;
+unsigned long nommu_bank_switch_last_cycles;
+
 /* A single-owner descriptor survives, but owns no backup pages. Keeping
  * that descriptor stable matters when another mm exits while fork sleeps
  * in bank_alloc(). Only the owning mm can replace its descriptor.
@@ -251,12 +262,13 @@ static void bank_move_pages(struct nommu_bank *to, struct nommu_bank *from)
 void nommu_bank_switch(struct mm_struct *mm)
 {
 	struct nommu_bank *bank;
-	unsigned long flags;
+	unsigned long flags, started;
 
 	/* init_mm has no user banks and a zero-initialized context. */
 	if (!mm->context.nommu_banks.next)
 		return;
 	local_irq_save(flags);
+	started = get_ccount();
 	list_for_each_entry(bank, &mm->context.nommu_banks, link) {
 		struct vm_region *region = bank->region;
 		struct nommu_bank *out = region->bank_owner;
@@ -297,6 +309,12 @@ void nommu_bank_switch(struct mm_struct *mm)
 		}
 		region->bank_owner = bank;
 	}
+	/* get_ccount() wraps every 18 seconds at 240 MHz; a switch that took
+	 * that long is not a measurement worth keeping.
+	 */
+	nommu_bank_switch_last_cycles = get_ccount() - started;
+	if (nommu_bank_switch_last_cycles > nommu_bank_switch_max_cycles)
+		nommu_bank_switch_max_cycles = nommu_bank_switch_last_cycles;
 	local_irq_restore(flags);
 }
 
