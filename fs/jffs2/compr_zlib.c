@@ -42,6 +42,12 @@ static z_stream inf_strm, def_strm;
 
 static int __init alloc_workspaces(void)
 {
+	/* With CMODE_NONE jffs2_compress() returns before it ever reaches a
+	 * compressor, so the deflate workspace -- about 264 KiB of vmalloc,
+	 * held for the life of the system -- is never touched. Reading still
+	 * needs inflate: the factory /etc and /home images are compressed.
+	 */
+#ifndef CONFIG_JFFS2_CMODE_NONE
 	def_strm.workspace = vmalloc(zlib_deflate_workspacesize(MAX_WBITS,
 							MAX_MEM_LEVEL));
 	if (!def_strm.workspace)
@@ -49,9 +55,12 @@ static int __init alloc_workspaces(void)
 
 	jffs2_dbg(1, "Allocated %d bytes for deflate workspace\n",
 		  zlib_deflate_workspacesize(MAX_WBITS, MAX_MEM_LEVEL));
+#endif
 	inf_strm.workspace = vmalloc(zlib_inflate_workspacesize());
 	if (!inf_strm.workspace) {
+#ifndef CONFIG_JFFS2_CMODE_NONE
 		vfree(def_strm.workspace);
+#endif
 		return -ENOMEM;
 	}
 	jffs2_dbg(1, "Allocated %d bytes for inflate workspace\n",
@@ -61,7 +70,9 @@ static int __init alloc_workspaces(void)
 
 static void free_workspaces(void)
 {
+#ifndef CONFIG_JFFS2_CMODE_NONE
 	vfree(def_strm.workspace);
+#endif
 	vfree(inf_strm.workspace);
 }
 #else
@@ -78,6 +89,13 @@ static int jffs2_zlib_compress(unsigned char *data_in,
 	if (*dstlen <= STREAM_END_SPACE)
 		return -1;
 
+#ifdef CONFIG_JFFS2_CMODE_NONE
+	/* No deflate workspace was allocated (see alloc_workspaces), so this
+	 * must never run: compr=zlib on the mount line is the one way in.
+	 * Returning -1 makes jffs2_compress() store the node uncompressed.
+	 */
+	return -1;
+#endif
 	mutex_lock(&deflate_mutex);
 
 	if (Z_OK != zlib_deflateInit(&def_strm, 3)) {
