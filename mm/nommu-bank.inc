@@ -7,19 +7,103 @@
 static bool nommu_bank_trace;
 module_param_named(fork_bank_trace, nommu_bank_trace, bool, 0600);
 MODULE_PARM_DESC(fork_bank_trace, "Log successful NOMMU bank forks (default off)");
-#define NOMMU_BANK_MAX_BYTES (512UL * 1024)
+/*
+ * Ceiling on the private memory one fork may bank. It also bounds the time
+ * nommu_bank_switch() spends with interrupts disabled, because a switch
+ * exchanges every banked page: budget roughly this many bytes of PSRAM
+ * traffic per context switch between two banked processes.
+ */
+static unsigned long nommu_bank_max_bytes = 512UL * 1024;
+module_param_named(fork_bank_max_bytes, nommu_bank_max_bytes, ulong, 0644);
+MODULE_PARM_DESC(fork_bank_max_bytes,
+		 "Largest private memory a fork may bank, in bytes (default 524288)");
+#define NOMMU_BANK_MAX_BYTES (READ_ONCE(nommu_bank_max_bytes))
 #define BANK_GFP (GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN)
 
+/*
+ * Shadow pages move between descriptors instead of being copied into a
+ * private backup per process. For a region shared by N processes, one is
+ * resident and the other N-1 hold a page set each: N-1 sets, not N. The
+ * resident owner's descriptor carries no pages at all (count == 0), which is
+ * what halves the cost of the first fork.
+ *
+ * capacity is the region's page count, fixed when the descriptor is created.
+ * NOMMU sys_brk() grows the heap inside the region without moving vm_top, so
+ * every descriptor for one region agrees on it; the swap checks anyway.
+ */
 struct nommu_bank {
 	struct list_head link;
 	struct list_head siblings;
 	struct vm_region *region;
 	unsigned int count;
+	unsigned int capacity;
 	void *pages[];
 };
 
 atomic_long_t nommu_bank_shadow_pages = ATOMIC_LONG_INIT(0);
 atomic_long_t nommu_bank_recovered_pages = ATOMIC_LONG_INIT(0);
+
+/* Set from nommu_bank_switch(), which cannot print. Drained by the fork and
+ * exit paths, which can. A single latch is enough: the first inconsistency
+ * is the one worth seeing, and the model does not recover from it.
+ */
+static bool nommu_bank_broken;
+
+/* Pages a context switch had to give up but could not free: free_page()
+ * under the runqueue lock with interrupts off is not allowed. Pushed by the
+ * switch, drained by fork and exit, which may sleep.
+ */
+static void *nommu_bank_orphans[64];
+static unsigned int nommu_bank_orphan_count;
+
+static void bank_orphan_pages(struct nommu_bank *bank)
+{
+	unsigned int i;
+
+	for (i = 0; i < bank->count; i++) {
+		if (nommu_bank_orphan_count < ARRAY_SIZE(nommu_bank_orphans)) {
+			nommu_bank_orphans[nommu_bank_orphan_count++] = bank->pages[i];
+		} else {
+			/* The list is drained on every fork and exit, so it
+			 * filling up means something is very wrong. Leak the
+			 * page rather than free it from here.
+			 */
+			nommu_bank_broken = true;
+		}
+		bank->pages[i] = NULL;
+	}
+	atomic_long_sub(bank->count, &nommu_bank_shadow_pages);
+	atomic_long_add(bank->count, &nommu_bank_recovered_pages);
+	bank->count = 0;
+}
+
+static void bank_drain_orphans(void)
+{
+	void *pages[ARRAY_SIZE(nommu_bank_orphans)];
+	unsigned long flags;
+	unsigned int i, n;
+
+	if (likely(!READ_ONCE(nommu_bank_orphan_count)))
+		return;
+	local_irq_save(flags);
+	n = nommu_bank_orphan_count;
+	for (i = 0; i < n; i++)
+		pages[i] = nommu_bank_orphans[i];
+	nommu_bank_orphan_count = 0;
+	local_irq_restore(flags);
+	for (i = 0; i < n; i++)
+		free_page((unsigned long)pages[i]);
+}
+
+static void bank_report_broken(const char *where)
+{
+	if (likely(!READ_ONCE(nommu_bank_broken)))
+		return;
+	WRITE_ONCE(nommu_bank_broken, false);
+	pr_err("nommu-bank: inconsistent bank state seen during a context switch, noticed in %s\n",
+	       where);
+	dump_stack();
+}
 
 /* A single-owner descriptor survives, but owns no backup pages. Keeping
  * that descriptor stable matters when another mm exits while fork sleeps
@@ -28,8 +112,14 @@ atomic_long_t nommu_bank_recovered_pages = ATOMIC_LONG_INIT(0);
 static void bank_release_pages(struct nommu_bank *bank)
 {
 	unsigned int i;
-	for (i = 0; i < bank->count; i++)
+	for (i = 0; i < bank->count; i++) {
 		free_page((unsigned long)bank->pages[i]);
+		/* An owner sits at count 0 for its whole resident life, so a
+		 * stale pointer here would be a freed page reachable from a
+		 * live descriptor. Clear the slot with the page.
+		 */
+		bank->pages[i] = NULL;
+	}
 	atomic_long_sub(bank->count, &nommu_bank_shadow_pages);
 	bank->count = 0;
 }
@@ -40,25 +130,52 @@ static void bank_free(struct nommu_bank *bank)
 	kfree(bank);
 }
 
-static struct nommu_bank *bank_alloc(struct vm_region *region)
+static unsigned int bank_capacity(struct vm_region *region)
 {
-	unsigned int i, count = (region->vm_top - region->vm_start) >> PAGE_SHIFT;
+	return (region->vm_top - region->vm_start) >> PAGE_SHIFT;
+}
+
+/* A descriptor with no pages: what the resident owner holds. */
+static struct nommu_bank *bank_alloc_desc(struct vm_region *region)
+{
+	unsigned int capacity = bank_capacity(region);
 	struct nommu_bank *bank;
 
-	bank = kzalloc(struct_size(bank, pages, count), BANK_GFP);
+	bank = kzalloc(struct_size(bank, pages, capacity), BANK_GFP);
 	if (!bank)
 		return NULL;
 	INIT_LIST_HEAD(&bank->link);
 	INIT_LIST_HEAD(&bank->siblings);
 	bank->region = region;
-	for (i = 0; i < count; i++) {
+	bank->capacity = capacity;
+	return bank;
+}
+
+static int bank_alloc_pages(struct nommu_bank *bank)
+{
+	unsigned int i;
+
+	for (i = 0; i < bank->capacity; i++) {
 		bank->pages[i] = (void *)__get_free_page(BANK_GFP);
 		if (!bank->pages[i]) {
-			bank_free(bank);
-			return NULL;
+			bank_release_pages(bank);
+			return -ENOMEM;
 		}
 		bank->count++;
 		atomic_long_inc(&nommu_bank_shadow_pages);
+	}
+	return 0;
+}
+
+static struct nommu_bank *bank_alloc(struct vm_region *region)
+{
+	struct nommu_bank *bank = bank_alloc_desc(region);
+
+	if (!bank)
+		return NULL;
+	if (bank_alloc_pages(bank)) {
+		bank_free(bank);
+		return NULL;
 	}
 	return bank;
 }
@@ -76,6 +193,61 @@ static void bank_copy(struct nommu_bank *bank, bool save)
 	}
 }
 
+/*
+ * Exchange a resident page with a shadow page. Two loads and two stores per
+ * word is exactly what the save-then-restore pair of memcpy() cost, so the
+ * traffic per context switch does not change -- what changes is that the
+ * outgoing process's data lands in the page set the incoming one vacated,
+ * instead of needing a second set of its own.
+ */
+static void bank_swap_page(void *resident, void *shadow)
+{
+	unsigned long *a = resident, *b = shadow;
+	unsigned int words = PAGE_SIZE / sizeof(unsigned long);
+
+	while (words--) {
+		unsigned long tmp = *a;
+
+		*a++ = *b;
+		*b++ = tmp;
+	}
+}
+
+/* Whether the set may be handed from "from" to "to". Asked before anything
+ * is touched: this runs inside switch_mm with interrupts off, where there is
+ * no way to report a problem and no way to undo half a move. The receiver is
+ * the outgoing resident owner, so it must hold nothing -- overwriting a live
+ * pages[] would leak every page in it.
+ */
+static bool bank_can_move(struct nommu_bank *to, struct nommu_bank *from)
+{
+	if (to->capacity != from->capacity || to->count) {
+		/* Cannot printk here: this is called under the runqueue lock
+		 * with interrupts off, and printk wakes the console thread,
+		 * which re-enters the scheduler. Latch it and let the next
+		 * fork or exit, which may sleep, report it.
+		 */
+		nommu_bank_broken = true;
+		return false;
+	}
+	return true;
+}
+
+/* Hand the page set over: "from" gives up its pages, "to" takes them.
+ * Only ever called when bank_can_move() has just returned true.
+ */
+static void bank_move_pages(struct nommu_bank *to, struct nommu_bank *from)
+{
+	unsigned int i;
+
+	for (i = 0; i < from->count; i++) {
+		to->pages[i] = from->pages[i];
+		from->pages[i] = NULL;
+	}
+	to->count = from->count;
+	from->count = 0;
+}
+
 void nommu_bank_switch(struct mm_struct *mm)
 {
 	struct nommu_bank *bank;
@@ -87,11 +259,42 @@ void nommu_bank_switch(struct mm_struct *mm)
 	local_irq_save(flags);
 	list_for_each_entry(bank, &mm->context.nommu_banks, link) {
 		struct vm_region *region = bank->region;
-		if (region->bank_owner == bank)
+		struct nommu_bank *out = region->bank_owner;
+		unsigned int i;
+
+		if (out == bank)
 			continue;
-		if (region->bank_owner)
-			bank_copy(region->bank_owner, true);
-		bank_copy(bank, false);
+		if (out) {
+			/* Swap in place: afterwards the region holds the incoming
+			 * process's data and bank->pages holds the outgoing one's,
+			 * so the pages simply change owner. Ask first: a refusal
+			 * here must leave the region exactly as it was, because
+			 * swapping and then failing to move the pages would give
+			 * the incoming process the outgoing one's memory.
+			 */
+			if (!bank_can_move(out, bank))
+				continue;
+			for (i = 0; i < bank->count; i++)
+				bank_swap_page((void *)(region->vm_start + i * PAGE_SIZE),
+					       bank->pages[i]);
+			bank_move_pages(out, bank);
+		} else {
+			/* Nobody owns what is resident: bank_detach() promotes an
+			 * heir on every departure, so this should be unreachable.
+			 * Restore from our own set and leave it alone -- freeing
+			 * pages here would be free_page() under the runqueue lock
+			 * with interrupts off. Ownership is not claimed either, so
+			 * the invariant "the owner holds no pages" still holds.
+			 * The pages cannot be freed from here -- that is
+			 * free_page() under the runqueue lock with interrupts
+			 * off -- so they go on the orphan list for the next
+			 * fork or exit to release. Ownership must be taken:
+			 * a region left without an owner makes every later
+			 * fork of it fail, and init hangs on its first one.
+			 */
+			bank_copy(bank, false);
+			bank_orphan_pages(bank);
+		}
 		region->bank_owner = bank;
 	}
 	local_irq_restore(flags);
@@ -101,29 +304,37 @@ static void bank_detach(struct vm_area_struct *vma)
 {
 	struct nommu_bank *bank = vma->nommu_bank;
 	unsigned long flags;
+	bool was_owner;
+
+	bank_report_broken("exit");
+	bank_drain_orphans();
 	if (!bank)
 		return;
 	local_irq_save(flags);
 	list_del_init(&bank->link);
-	if (bank->region->bank_owner == bank)
+	was_owner = bank->region->bank_owner == bank;
+	if (was_owner)
 		bank->region->bank_owner = NULL;
 	if (!list_empty(&bank->siblings)) {
-		struct nommu_bank *last = list_next_entry(bank, siblings);
+		struct nommu_bank *heir = list_next_entry(bank, siblings);
 
 		list_del_init(&bank->siblings);
-		if (list_empty(&last->siblings)) {
-			/* The departing process may still be resident. Restore the
-			 * survivor before discarding its only valid saved state.
-			 * UP only: free_page/kfree do not sleep; IRQ exclusion also
-			 * protects the switch list and a concurrent clone's checks.
-			 */
-			if (last->region->bank_owner != last)
-				bank_copy(last, false);
-			last->region->bank_owner = last;
-			list_del_init(&last->link);
-			atomic_long_add(last->count, &nommu_bank_recovered_pages);
-			bank_release_pages(last);
+		/* The resident copy belonged to the process that is leaving, so
+		 * it is now dead. Promote a sibling: restore its saved state and
+		 * hand back the pages it no longer needs, which is the same
+		 * invariant a switch maintains -- the resident owner holds none.
+		 * UP only: free_page and kfree do not sleep here, and IRQ
+		 * exclusion also covers the switch list and a concurrent clone.
+		 */
+		if (was_owner) {
+			bank_copy(heir, false);
+			heir->region->bank_owner = heir;
+			atomic_long_add(heir->count, &nommu_bank_recovered_pages);
+			bank_release_pages(heir);
 		}
+	} else if (was_owner) {
+		/* Last user of the region and it was resident: nothing to save. */
+		atomic_long_add(bank->count, &nommu_bank_recovered_pages);
 	}
 	vma->nommu_bank = NULL;
 	local_irq_restore(flags);
@@ -133,27 +344,59 @@ static void bank_detach(struct vm_area_struct *vma)
 static int bank_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
 {
 	struct vm_region *region = src->vm_region;
-	struct nommu_bank *parent, *child, *old = NULL;
+	struct nommu_bank *parent, *child, *existing;
 	unsigned long flags;
 	bool fresh;
 
+	bank_report_broken("fork");
+	bank_drain_orphans();
+
 	/* Allocate the child first: sleeping here can let the last sibling
 	 * exit and release the parent's shadows. Recheck AFTER allocation.
+	 *
+	 * One page set, not two. Parent and child have identical memory at this
+	 * instant and the caller is resident, so the child's copy is the only
+	 * one that has to exist; the parent stays resident and owns no pages.
+	 * That is the difference between 2P and P for the first fork of a
+	 * region -- 552 KiB against 276 KiB for a bash of the measured size.
 	 */
 	child = bank_alloc(region);
 	if (!child)
 		return -ENOMEM;
 	parent = src->nommu_bank;
-	fresh = !parent || !parent->count;
+	/* The process calling fork is running, so its memory is the resident
+	 * copy and its descriptor must be the region's owner. If that does not
+	 * hold, the resident bytes belong to somebody else and copying them
+	 * into the child would hand it the wrong memory: refuse instead.
+	 */
+	if (parent && WARN_ON_ONCE(region->bank_owner != parent)) {
+		bank_free(child);
+		return -EINVAL;
+	}
+	fresh = !parent;
 	if (fresh) {
-		old = parent;
-		parent = bank_alloc(region);
+		parent = bank_alloc_desc(region);
 		if (!parent) {
 			bank_free(child);
 			return -ENOMEM;
 		}
 	}
 	local_irq_save(flags);
+	/* One bank per region per mm. Two would make nommu_bank_switch() walk
+	 * the same region twice in one pass: the second visit swaps it back,
+	 * leaving the process on a stale snapshot with its live pages parked
+	 * in a descriptor that no longer owns them. dup_mmap's vm_usage check
+	 * should already prevent it, but that check exists for other reasons.
+	 */
+	list_for_each_entry(existing, &dst->vm_mm->context.nommu_banks, link) {
+		if (existing->region == region) {
+			local_irq_restore(flags);
+			bank_free(child);
+			if (fresh)
+				bank_free(parent);
+			return -EOPNOTSUPP;
+		}
+	}
 	if (fresh) {
 		src->nommu_bank = parent;
 		list_add_tail(&parent->link, &src->vm_mm->context.nommu_banks);
@@ -165,8 +408,6 @@ static int bank_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
 	list_add_tail(&child->siblings, &parent->siblings);
 	list_add_tail(&child->link, &dst->vm_mm->context.nommu_banks);
 	local_irq_restore(flags);
-	if (old)
-		bank_free(old);
 	return 0;
 }
 
@@ -276,19 +517,27 @@ static void bank_access(struct vm_area_struct *vma, unsigned long addr,
 {
 	struct nommu_bank *bank = vma->nommu_bank;
 	unsigned long flags;
-	local_irq_save(flags);
+
+	/* len comes from __access_remote_vm() and is bounded only by the size
+	 * of the VMA, so cat /proc/PID/mem could ask for one 512 KiB memcpy
+	 * with interrupts off. The loop is already chunked to a page; keep the
+	 * exclusion inside it so the window is a page too.
+	 */
 	while (len) {
 		unsigned long offset = addr - bank->region->vm_start;
 		unsigned long chunk = min(len, PAGE_SIZE - offset_in_page(offset));
-		void *ptr = bank->region->bank_owner == bank ? (void *)addr :
+		void *ptr;
+
+		local_irq_save(flags);
+		ptr = bank->region->bank_owner == bank ? (void *)addr :
 			bank->pages[offset >> PAGE_SHIFT] + offset_in_page(offset);
 		if (write)
 			memcpy(ptr, buf, chunk);
 		else
 			memcpy(buf, ptr, chunk);
+		local_irq_restore(flags);
 		addr += chunk;
 		buf += chunk;
 		len -= chunk;
 	}
-	local_irq_restore(flags);
 }
