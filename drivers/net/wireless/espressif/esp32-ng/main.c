@@ -55,10 +55,8 @@ static int process_tx_packet(struct sk_buff *skb)
 	u8 pad_len = 0, realloc_skb = 0;
 	u16 len = 0;
 	u16 total_len = 0;
-	static u8 c;
 	u8 *pos = NULL;
 
-	c++;
 	/* Get the priv */
 	cb = (struct esp_skb_cb *) skb->cb;
 	priv = cb->priv;
@@ -279,7 +277,19 @@ int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8 len)
 	pos = evt_buf;
 
 	while (len_left > 0) {
+		if (len_left < 2)
+			break;
 		tag_len = *(pos + 1);
+
+		/* tag_len arrives from the firmware and was used both to
+		 * advance pos and to size process_fw_data()'s read, with
+		 * nothing checking it against what is left of the event.
+		 */
+		if (tag_len + 2 > len_left) {
+			esp_err("bootup event tag %x claims %d bytes, %d left\n",
+				*pos, tag_len, len_left);
+			break;
+		}
 
 		esp_info("Bootup Event tag: %d\n", *pos);
 
@@ -678,10 +688,6 @@ static void process_rx_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 	len = le16_to_cpu(payload_header->len);
 	offset = le16_to_cpu(payload_header->offset);
 
-	if (payload_header->reserved2 == 0xFF) {
-		print_hex_dump(KERN_INFO, "Wake up packet: ", DUMP_PREFIX_ADDRESS, 16, 1, skb->data, len+offset, 1);
-	}
-
 	if (adapter->capabilities & ESP_CHECKSUM_ENABLED) {
 		rx_checksum = le16_to_cpu(payload_header->checksum);
 		payload_header->checksum = 0;
@@ -850,8 +856,12 @@ struct sk_buff *esp_alloc_skb(u32 len)
 		/* Align SKB data pointer */
 		offset = ((unsigned long)skb->data) & (SKB_DATA_ADDR_ALIGNMENT - 1);
 
-		if (offset)
-			skb_reserve(skb, INTERFACE_HEADER_PADDING - offset);
+		/* Unconditional: the term is zero when the pointer is already
+		 * aligned, which is the usual case, and skipping the reserve
+		 * there left no headroom at all -- forcing process_tx_packet()
+		 * to allocate a second skb and copy every outgoing frame.
+		 */
+		skb_reserve(skb, INTERFACE_HEADER_PADDING - offset);
 	}
 
 	return skb;
@@ -910,6 +920,10 @@ static int init_adapter(struct esp_adapter *adapter, const struct esp_if_ops *if
 	memset(adapter, 0, sizeof(*adapter));
 
 	adapter->if_ops = if_ops;
+	/* deinit_adapter() purges this queue on every error path below, so
+	 * it has to exist before the first allocation that can fail.
+	 */
+	skb_queue_head_init(&adapter->events_skb_q);
 
 	/* Prepare interface RX work */
 	adapter->if_rx_workqueue = alloc_workqueue("ESP_IF_RX_WORK_QUEUE", 0, 0);
@@ -920,8 +934,6 @@ static int init_adapter(struct esp_adapter *adapter, const struct esp_if_ops *if
 	}
 
 	INIT_WORK(&adapter->if_rx_work, esp_if_rx_work);
-
-	skb_queue_head_init(&adapter->events_skb_q);
 
 	adapter->events_wq = alloc_workqueue("ESP_EVENTS_WORKQUEUE", WQ_HIGHPRI, 0);
 

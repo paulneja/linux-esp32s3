@@ -11,7 +11,17 @@
 #include "esp.h"
 
 #define ESP_NUM_OF_CMD_NODES 20
-#define ESP_SIZE_OF_CMD_NODE 2048
+/* The shmem transport caps a packet at SHMEM_BUF_SIZE, so a command node
+ * larger than that could never be sent: write_packet() drops it. 2048 landed
+ * every command in the kmalloc-4096 slab; 1600 fits kmalloc-2048 and still
+ * holds anything the transport can carry.
+ */
+#define ESP_SIZE_OF_CMD_NODE 1600
+/* Largest command payload the shmem transport will carry: its packet cap
+ * (SHMEM_BUF_SIZE, 1600) less the payload header, and the node holds a
+ * header of its own on top of that.
+ */
+#define ESP_MAX_CMD_PAYLOAD (ESP_SIZE_OF_CMD_NODE - 2 * sizeof(struct esp_payload_header))
 
 #define ESP_CMD_HIGH_PRIO    1
 #define ESP_CMD_DFLT_PRIO    0

@@ -118,6 +118,7 @@ static int process_rx_buf(struct esp_wifi_shmem *hw, struct sk_buff *skb)
 	struct esp_payload_header *header;
 	u16 len = 0;
 	u16 offset = 0;
+	u32 total;
 
 	if (!skb)
 		return -EINVAL;
@@ -143,15 +144,19 @@ static int process_rx_buf(struct esp_wifi_shmem *hw, struct sk_buff *skb)
 		return -EINVAL;
 	}
 
-	len += sizeof(struct esp_payload_header);
+	/* In u32: len is u16 and adding the header to it wrapped, so a length
+	 * near 65535 passed the test below and left an 11 byte packet of
+	 * whatever happened to be in the buffer.
+	 */
+	total = (u32)len + sizeof(struct esp_payload_header);
 
-	if (len > SHMEM_BUF_SIZE) {
-		pr_err("%s: bad len %d\n", __func__, len);
+	if (total > SHMEM_BUF_SIZE) {
+		pr_err("%s: bad len %u\n", __func__, total);
 		return -EINVAL;
 	}
 
 	/* Trim SKB to actual size */
-	skb_trim(skb, len);
+	skb_trim(skb, total);
 
 	/* enqueue skb for read_packet to pick it */
 	if (header->if_type == ESP_INTERNAL_IF)
@@ -166,15 +171,30 @@ static int process_rx_buf(struct esp_wifi_shmem *hw, struct sk_buff *skb)
 
 static bool esp_wifi_shmem_handle_rx(struct esp_wifi_shmem *hw, void *p)
 {
-	struct sk_buff *rx_skb = esp_alloc_skb(SHMEM_BUF_SIZE);
+	const struct esp_payload_header *src = p;
+	struct sk_buff *rx_skb;
+	u32 total;
 	u8 *rx_buf;
 	int ret;
 
+	/* Read the header first and copy only what the packet says it is. The
+	 * firmware allocates exactly payload plus header -- as little as 12
+	 * bytes for a short command response -- so copying a fixed
+	 * SHMEM_BUF_SIZE read past the end of core 0's allocation, and paid
+	 * for 1600 bytes on every packet besides.
+	 */
+	total = (u32)le16_to_cpu(src->len) + le16_to_cpu(src->offset);
+	if (total < sizeof(*src) || total > SHMEM_BUF_SIZE) {
+		pr_err("%s: bad length %u\n", __func__, total);
+		return false;
+	}
+
+	rx_skb = esp_alloc_skb(total);
 	if (!rx_skb)
 		return false;
 
-	rx_buf = skb_put(rx_skb, SHMEM_BUF_SIZE);
-	memcpy(rx_buf, p, SHMEM_BUF_SIZE);
+	rx_buf = skb_put(rx_skb, total);
+	memcpy(rx_buf, p, total);
 
 	ret = process_rx_buf(hw, rx_skb);
 	if (ret)
@@ -213,6 +233,10 @@ static void esp_wifi_shmem_rx_batch(void *dev, u32 tag)
 	struct esp_wifi_shmem *hw = dev;
 
 	esp_process_new_packet_intr(&hw->adapter);
+	/* Transmit completion must not depend on a receive having succeeded:
+	 * this is the only caller of handle_tx, which is the only place skbs
+	 * leave tx_q and the only place esp_tx_resume() wakes the queue.
+	 */
 	esp_wifi_shmem_handle_tx(hw, tag);
 }
 
@@ -235,15 +259,22 @@ static int esp_wifi_shmem_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	ret = esp32_ipc_register_rx(hw->ipc, hw->ipc_addr, hw,
-				  esp_wifi_shmem_rx_handler,
-				  esp_wifi_shmem_rx_batch);
-	if (ret < 0)
-		return ret;
-
+	/* Bring the adapter up before core 0 can deliver anything to it:
+	 * there is no way to unregister an IPC receiver, so registering first
+	 * and then failing esp_wifi_init() left core 0 a callback into a
+	 * half-initialised, devm-freed object.
+	 */
 	ret = esp_wifi_init(&hw->adapter, &if_ops);
 	if (ret < 0)
 		return ret;
+
+	ret = esp32_ipc_register_rx(hw->ipc, hw->ipc_addr, hw,
+				  esp_wifi_shmem_rx_handler,
+				  esp_wifi_shmem_rx_batch);
+	if (ret < 0) {
+		esp_wifi_deinit(&hw->adapter);
+		return ret;
+	}
 
 	esp32_ipc_tx(hw->ipc, hw->ipc_addr, NULL, NULL);
 

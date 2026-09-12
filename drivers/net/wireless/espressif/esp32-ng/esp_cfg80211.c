@@ -97,11 +97,11 @@ static struct ieee80211_supported_band esp_wifi_bands = {
 
 /* Supported crypto cipher suits to be advertised to cfg80211 */
 static const u32 esp_cipher_suites[] = {
-	WLAN_CIPHER_SUITE_WEP40,
-	WLAN_CIPHER_SUITE_WEP104,
-	WLAN_CIPHER_SUITE_TKIP,
+	/* WEP40, WEP104, TKIP and SMS4 were advertised here. This board joins
+	 * WPA2 networks; offering ciphers broken for a decade only gives a
+	 * hostile AP a downgrade to ask for.
+	 */
 	WLAN_CIPHER_SUITE_CCMP,
-	WLAN_CIPHER_SUITE_SMS4,
 	WLAN_CIPHER_SUITE_AES_CMAC,
 };
 
@@ -117,14 +117,20 @@ static int esp_inetaddr_event(struct notifier_block *nb,
 	unsigned long event, void *data)
 {
 	struct in_ifaddr *ifa = data;
-	struct net_device *netdev = ifa->ifa_dev ? ifa->ifa_dev->dev : NULL;
-	struct esp_wifi_device *priv = netdev_priv(netdev);
+	struct net_device *netdev = ifa && ifa->ifa_dev ? ifa->ifa_dev->dev : NULL;
+	struct esp_wifi_device *priv;
 
-	/*esp_info("------- IP event -------: %d\n", priv->if_type);*/
+	/* This notifier is global: it fires for lo and for every other netdev
+	 * in the system, and ifa_dev can be NULL. netdev_priv(NULL) was being
+	 * computed before anything checked.
+	 */
+	if (!netdev)
+		return NOTIFY_DONE;
 
-	if (!strstr(netdev->name, "espsta")) {
-		return 0;
-	}
+	if (!strstr(netdev->name, "espsta"))
+		return NOTIFY_DONE;
+
+	priv = netdev_priv(netdev);
 
 	switch (event) {
 
@@ -229,11 +235,20 @@ struct wireless_dev *esp_cfg80211_add_iface(struct wiphy *wiphy,
 	return &esp_wdev->wdev;
 
 free_and_return:
+	/* esp_wdev is netdev_priv(ndev): it lives inside the net_device, so it
+	 * is gone the moment free_netdev() returns and the two stores that used
+	 * to follow were writes to freed memory. adapter->priv[] was left
+	 * pointing at it too, and get_priv_from_payload_header() would walk it
+	 * on the next packet. This path is taken when cmd_init_interface() or
+	 * cmd_get_mac() time out, which is exactly when core 0 is slow or
+	 * wedged at boot.
+	 */
 	clear_bit(ESP_DRIVER_ACTIVE, &esp_wdev->adapter->state_flags);
-	dev_net_set(ndev, NULL);
-	free_netdev(ndev);
+	esp_wdev->adapter->priv[esp_nw_if_num] = NULL;
 	esp_wdev->ndev = NULL;
 	esp_wdev->wdev.netdev = NULL;
+	dev_net_set(ndev, NULL);
+	free_netdev(ndev);
 	ndev = NULL;
 	return NULL;
 }
