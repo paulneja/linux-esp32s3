@@ -9,9 +9,9 @@ module_param_named(fork_bank_trace, nommu_bank_trace, bool, 0600);
 MODULE_PARM_DESC(fork_bank_trace, "Log successful NOMMU bank forks (default off)");
 /*
  * Ceiling on the private memory one fork may bank. It also bounds the time
- * nommu_bank_switch() spends with interrupts disabled, because a switch
- * exchanges every banked page: budget roughly this many bytes of PSRAM
- * traffic per context switch between two banked processes.
+ * nommu_bank_switch() takes, because a switch exchanges every banked page:
+ * budget roughly this many bytes of PSRAM traffic per context switch between
+ * two banked processes.
  */
 static unsigned long nommu_bank_max_bytes = 512UL * 1024;
 module_param_named(fork_bank_max_bytes, nommu_bank_max_bytes, ulong, 0644);
@@ -105,13 +105,10 @@ static void bank_report_broken(const char *where)
 	dump_stack();
 }
 
-/* How long a context switch spends with interrupts disabled, in CPU cycles.
- * This is the number that decides how large fork_bank_max_bytes may safely
- * be: a switch between two banked processes exchanges every banked page with
- * interrupts off, so the timer tick, the shmem IPC interrupt and the UART all
- * wait for it. Reported in /proc/meminfo as ForkSwitchMax, in microseconds at
- * the nominal 240 MHz; write anything to /proc/sys/vm/fork_bank_reset_max to
- * clear it before a measurement.
+/* How long a context switch spends exchanging banked pages, in CPU cycles.
+ * Reported in /proc/meminfo as ForkSwitchMax, in microseconds at the nominal
+ * 240 MHz; write anything to /proc/sys/vm/fork_bank_reset_max to clear it
+ * before a measurement.
  */
 unsigned long nommu_bank_switch_max_cycles;
 unsigned long nommu_bank_switch_last_cycles;
@@ -262,12 +259,12 @@ static void bank_move_pages(struct nommu_bank *to, struct nommu_bank *from)
 void nommu_bank_switch(struct mm_struct *mm)
 {
 	struct nommu_bank *bank;
-	unsigned long flags, started;
+	unsigned long started;
 
 	/* init_mm has no user banks and a zero-initialized context. */
 	if (!mm->context.nommu_banks.next)
 		return;
-	local_irq_save(flags);
+	preempt_disable();
 	started = get_ccount();
 	list_for_each_entry(bank, &mm->context.nommu_banks, link) {
 		struct vm_region *region = bank->region;
@@ -315,7 +312,7 @@ void nommu_bank_switch(struct mm_struct *mm)
 	nommu_bank_switch_last_cycles = get_ccount() - started;
 	if (nommu_bank_switch_last_cycles > nommu_bank_switch_max_cycles)
 		nommu_bank_switch_max_cycles = nommu_bank_switch_last_cycles;
-	local_irq_restore(flags);
+	preempt_enable();
 }
 
 static void bank_detach(struct vm_area_struct *vma)

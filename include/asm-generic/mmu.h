@@ -14,6 +14,7 @@ typedef struct {
 	unsigned long		end_brk;
 #ifdef CONFIG_XTENSA_NOMMU_FORK
 	struct list_head nommu_banks;
+	unsigned int bank_switch_pending;
 #endif
 
 #ifdef CONFIG_BINFMT_ELF_FDPIC

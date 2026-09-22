@@ -67,7 +67,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "ForkShadow:     ", atomic_long_read(&nommu_bank_shadow_pages));
 	show_val_kb(m, "ForkRecovered:  ", atomic_long_read(&nommu_bank_recovered_pages));
 	/* Microseconds at the nominal 240 MHz: the worst and the most recent
-	 * time a context switch held interrupts off to exchange banked pages.
+	 * time a context switch spent exchanging banked pages.
 	 */
 	seq_printf(m, "ForkSwitchMax:  %8lu us\n",
 		   nommu_bank_switch_max_cycles / 240);
