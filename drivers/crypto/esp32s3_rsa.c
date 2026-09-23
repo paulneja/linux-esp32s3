@@ -3,6 +3,7 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
@@ -196,6 +197,10 @@ static void esp_rsa_free_key(struct esp_rsa_key *k)
 {
 	mpi_free(k->n_mpi);
 	k->n_mpi = NULL;
+	memzero_explicit(k->n, sizeof(k->n));
+	memzero_explicit(k->e, sizeof(k->e));
+	memzero_explicit(k->d, sizeof(k->d));
+	memzero_explicit(k->rr, sizeof(k->rr));
 	k->have_e = k->have_d = false;
 	k->nwords = 0;
 }
