@@ -237,13 +237,14 @@ static int esp32_gpio_get_multiple(struct gpio_chip *gc,
 	return 0;
 }
 
-static void esp32_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+static int esp32_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
 {
 	esp32_gpio_set_output(gpiochip_get_data(gc), offset, value);
+	return 0;
 }
 
-static void esp32_gpio_set_multiple(struct gpio_chip *gc,
-				    unsigned long *mask, unsigned long *bits)
+static int esp32_gpio_set_multiple(struct gpio_chip *gc,
+				   unsigned long *mask, unsigned long *bits)
 {
 	struct esp32_gpio *chip = gpiochip_get_data(gc);
 	unsigned long v;
@@ -261,6 +262,7 @@ static void esp32_gpio_set_multiple(struct gpio_chip *gc,
 	v = ~bits[1] & mask[1];
 	if (v)
 		writel(v, chip->base + GPIO_OUT1_W1TC_REG);
+	return 0;
 }
 
 static void esp32_gpio_irq_mask(struct irq_data *irq_data)
