@@ -120,17 +120,13 @@ static const struct irq_domain_ops esp32_domain_ops = {
 	.free = esp32_intc_domain_free,
 };
 
-static int __init esp32_intc_hw_init(struct device_node *node,
-				     struct esp32_intc **hw)
+static int esp32_intc_hw_init(struct platform_device *pdev,
+			      struct esp32_intc **hw)
 {
-	struct platform_device *pdev;
+	struct device_node *node = pdev->dev.of_node;
 	struct esp32_intc *priv;
 	resource_size_t size;
 	int cpu;
-
-	pdev = of_find_device_by_node(node);
-	if (!pdev)
-		return -ENODEV;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -157,9 +153,10 @@ static int __init esp32_intc_hw_init(struct device_node *node,
 	return 0;
 }
 
-static int __init esp32_intc_init(struct device_node *node,
-				  struct device_node *parent)
+static int esp32_intc_probe(struct platform_device *pdev,
+			    struct device_node *parent)
 {
+	struct device_node *node = pdev->dev.of_node;
 	struct irq_domain *parent_domain, *domain;
 	struct esp32_intc *priv;
 	int rc;
@@ -177,7 +174,7 @@ static int __init esp32_intc_init(struct device_node *node,
 		return -ENXIO;
 	}
 
-	rc = esp32_intc_hw_init(node, &priv);
+	rc = esp32_intc_hw_init(pdev, &priv);
 	if (rc < 0) {
 		pr_err("%pOF: couldn't init hw\n", node);
 		return rc;
@@ -194,5 +191,5 @@ static int __init esp32_intc_init(struct device_node *node,
 }
 
 IRQCHIP_PLATFORM_DRIVER_BEGIN(esp32_intc)
-IRQCHIP_MATCH("esp,esp32-intc", esp32_intc_init)
+IRQCHIP_MATCH("esp,esp32-intc", esp32_intc_probe)
 IRQCHIP_PLATFORM_DRIVER_END(esp32_intc)
