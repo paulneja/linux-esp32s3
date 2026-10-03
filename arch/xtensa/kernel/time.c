@@ -193,7 +193,7 @@ void __init time_init(void)
 	clocksource_register_hz(&ccount_clocksource, ccount_freq);
 	local_timer_setup(0);
 	irq = this_cpu_ptr(&ccount_timer)->evt.irq;
-	if (request_irq(irq, timer_interrupt, IRQF_TIMER, "timer", NULL))
+	if (request_irq(irq, timer_interrupt, IRQF_TIMER | IRQF_PERCPU, "timer", NULL))
 		pr_err("Failed to request irq %d (timer)\n", irq);
 	sched_clock_register(ccount_sched_clock_read, 32, ccount_freq);
 	timer_probe();
