@@ -110,11 +110,12 @@ static void bank_report_broken(const char *where)
 
 /* How long a context switch spends exchanging banked pages, in CPU cycles.
  * Reported in /proc/meminfo as ForkSwitchMax, in microseconds at the nominal
- * 240 MHz; write anything to /proc/sys/vm/fork_bank_reset_max to clear it
+ * 240 MHz; write 0 to the fork_bank_switch_max parameter to clear it
  * before a measurement.
  */
 unsigned long nommu_bank_switch_max_cycles;
 unsigned long nommu_bank_switch_last_cycles;
+module_param_named(fork_bank_switch_max, nommu_bank_switch_max_cycles, ulong, 0644);
 
 /* A single-owner descriptor survives, but owns no backup pages. Keeping
  * that descriptor stable matters when another mm exits while fork sleeps
