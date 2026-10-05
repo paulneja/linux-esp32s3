@@ -20,7 +20,8 @@ that the base is unmodified. Everything after it is ESP32-S3 support:
 - The port of that work from 6.11 to 7.2, and fixes for problems seen on real
   boards: a race in the WiFi command queue, scans left running on stop, a
   console that stalled when the USB port went away, IPC completions and
-  locking around flash commands.
+  locking around flash commands, and an FDPIC loader that let a program's
+  arguments run past the bottom of its stack and over kernel memory.
 - A driver for the hardware RSA accelerator, and `/dev/esp-ble`, the BLE pipe
   Linux-on-esp32-S3 uses to set up WiFi from a phone.
 - fork() without an MMU (`CONFIG_XTENSA_NOMMU_FORK`). Parent and child share
