@@ -429,6 +429,10 @@ static int load_elf_fdpic_binary(struct linux_binprm *bprm)
 		PAGE_ALIGN(current->mm->start_brk);
 
 #else
+	/* the args land on top of the stack and nothing checks they fit */
+	stack_size += MAX_ARG_PAGES * PAGE_SIZE - bprm->p;
+	stack_size += (bprm->argc + bprm->envc + 2) * sizeof(unsigned long);
+
 	/* create a stack area and zero-size brk area */
 	stack_size = (stack_size + PAGE_SIZE - 1) & PAGE_MASK;
 	if (stack_size < PAGE_SIZE * 2)
