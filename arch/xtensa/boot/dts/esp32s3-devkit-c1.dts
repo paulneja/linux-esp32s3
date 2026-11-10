@@ -68,11 +68,6 @@
 	pinctrl-0 = <&spi2_pins>;
 	pinctrl-names = "default";
 	status = "disabled";
-
-	mmc_spi@0 {
-		compatible = "mmc-spi-slot";
-		reg = <0>;
-	};
 };
 
 &acm {
