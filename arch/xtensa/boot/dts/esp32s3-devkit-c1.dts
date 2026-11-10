@@ -46,6 +46,14 @@
 	};
 };
 
+&gpio_in_mux {
+	status = "ok";
+};
+
+&gpio_out_mux {
+	status = "ok";
+};
+
 &gpio0 {
 	status = "ok";
 };
