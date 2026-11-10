@@ -24,12 +24,17 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_edid.h>
-#include <drm/drm_fbdev_shmem.h>
 #include <drm/drm_format_helper.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#ifdef CONFIG_MMU
+#include <drm/drm_fbdev_shmem.h>
 #include <drm/drm_gem_shmem_helper.h>
+#else
+#include <drm/drm_fbdev_dma.h>
+#include <drm/drm_gem_dma_helper.h>
+#endif
 #include <drm/drm_managed.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_rect.h>
@@ -1757,11 +1762,20 @@ static const uint32_t ssd130x_formats[] = {
 	DRM_FORMAT_XRGB8888,
 };
 
+#ifdef CONFIG_MMU
 DEFINE_DRM_GEM_FOPS(ssd130x_fops);
+#else
+DEFINE_DRM_GEM_DMA_FOPS(ssd130x_fops);
+#endif
 
 static const struct drm_driver ssd130x_drm_driver = {
+#ifdef CONFIG_MMU
 	DRM_GEM_SHMEM_DRIVER_OPS,
 	DRM_FBDEV_SHMEM_DRIVER_OPS,
+#else
+	DRM_GEM_DMA_DRIVER_OPS_VMAP,
+	DRM_FBDEV_DMA_DRIVER_OPS,
+#endif
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
 	.major			= DRIVER_MAJOR,

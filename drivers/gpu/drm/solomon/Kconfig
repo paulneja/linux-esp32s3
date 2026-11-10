@@ -1,9 +1,10 @@
 config DRM_SSD130X
 	tristate "DRM support for Solomon SSD13xx OLED displays"
-	depends on DRM && MMU
+	depends on DRM
 	select BACKLIGHT_CLASS_DEVICE
 	select DRM_CLIENT_SELECTION
-	select DRM_GEM_SHMEM_HELPER
+	select DRM_GEM_SHMEM_HELPER if MMU
+	select DRM_GEM_DMA_HELPER if !MMU
 	select DRM_KMS_HELPER
 	help
 	  DRM driver for the SSD13xx Solomon and SINO WEALTH SH110x OLED
