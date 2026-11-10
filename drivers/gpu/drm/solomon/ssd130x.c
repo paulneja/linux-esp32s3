@@ -13,6 +13,7 @@
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/gpio/consumer.h>
 #include <linux/property.h>
 #include <linux/pwm.h>
@@ -2005,6 +2006,15 @@ struct ssd130x_device *ssd130x_probe(struct device *dev, struct regmap *regmap)
 		ssd130x->page_address_mode = 1;
 
 	ssd130x_parse_properties(ssd130x);
+
+#ifndef CONFIG_MMU
+	/* the dma helper allocates against this device; spi and i2c set no mask */
+	if (!dev->coherent_dma_mask) {
+		ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
+		if (ret)
+			return ERR_PTR(dev_err_probe(dev, ret, "Failed to set the DMA mask\n"));
+	}
+#endif
 
 	ret = ssd130x_get_resources(ssd130x);
 	if (ret)
