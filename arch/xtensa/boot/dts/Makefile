@@ -9,5 +9,9 @@
 
 dtb-$(CONFIG_OF) += $(addsuffix .dtb, $(CONFIG_BUILTIN_DTB_NAME))
 
+ifdef CONFIG_OF_OVERLAY
+DTC_FLAGS += -@
+endif
+
 # for CONFIG_OF_ALL_DTBS test
 dtb-	:= $(patsubst $(src)/%.dts,%.dtb, $(wildcard $(src)/*.dts))
