@@ -11,7 +11,7 @@
 		reg = <0x3d800000 0x00800000>;
 	};
 
-	i2c0 {
+	i2c0: i2c0 {
 		#address-cells = <1>;
 		#size-cells = <0>;
 		compatible = "i2c-gpio";
@@ -59,7 +59,7 @@
 &spi2 {
 	pinctrl-0 = <&spi2_pins>;
 	pinctrl-names = "default";
-	status = "ok";
+	status = "disabled";
 
 	mmc_spi@0 {
 		compatible = "mmc-spi-slot";
