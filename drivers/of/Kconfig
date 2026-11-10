@@ -113,6 +113,14 @@ config OF_OVERLAY
 	  While this option is selected automatically when needed, you can
 	  enable it manually to improve device tree unit test coverage.
 
+config OF_CONFIGFS
+	bool "Device tree overlays from user space, through configfs"
+	depends on OF_OVERLAY && CONFIGFS_FS=y
+	help
+	  /sys/kernel/config/device-tree/overlays: make a directory, write a
+	  compiled overlay to its dtbo file and it is applied; remove the
+	  directory and it comes off again.
+
 config OF_OVERLAY_KUNIT_TEST
 	tristate "Device Tree overlay KUnit tests" if !KUNIT_ALL_TESTS
 	depends on KUNIT
