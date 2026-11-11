@@ -1087,7 +1087,7 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 
 	WARN_CONSOLE_UNLOCKED();
 
-	if (currcons >= MAX_NR_CONSOLES)
+	if (currcons >= CONFIG_VT_CONSOLES)
 		return -ENXIO;
 
 	if (vc_cons[currcons].d)
@@ -3961,7 +3961,7 @@ int __init vty_init(const struct file_operations *console_fops)
 
 	vcs_init();
 
-	console_driver = tty_alloc_driver(MAX_NR_CONSOLES, TTY_DRIVER_REAL_RAW |
+	console_driver = tty_alloc_driver(CONFIG_VT_CONSOLES, TTY_DRIVER_REAL_RAW |
 			TTY_DRIVER_RESET_TERMIOS);
 	if (IS_ERR(console_driver))
 		panic("Couldn't allocate console driver\n");

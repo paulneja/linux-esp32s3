@@ -49,6 +49,16 @@ config CONSOLE_TRANSLATIONS
 	  This enables support for font mapping and Unicode translation
 	  on virtual consoles.
 
+config VT_CONSOLES
+	int "Number of virtual consoles" if EXPERT
+	depends on VT
+	range 1 63
+	default 63
+	help
+	  Every virtual console gets a tty device at boot, whether it is ever
+	  used or not, and each one costs about 2 KiB of memory. A board with
+	  one small display needs one or two.
+
 config VT_CONSOLE
 	bool "Support for console on virtual terminal" if EXPERT
 	depends on VT
