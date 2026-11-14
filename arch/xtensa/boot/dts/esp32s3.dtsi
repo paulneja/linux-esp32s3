@@ -147,6 +147,12 @@
 			reg = <0x60008000 0x400>;
 		};
 
+		watchdog {
+			compatible = "esp,esp32s3-rtc-wdt";
+			regmap = <&lpm>;
+			timeout-sec = <30>;
+		};
+
 		syscon@60008000 {
 			compatible = "syscon-reboot";
 			regmap = <&lpm>;
