@@ -4,6 +4,7 @@
  * timer-group watchdogs for itself; the RTC one is left off by the
  * bootloader and resets the whole chip, both cores, when it runs out.
  */
+#include <linux/math64.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -11,6 +12,7 @@
 #include <linux/regmap.h>
 #include <linux/watchdog.h>
 
+#define STORE1		0x54	/* the firmware's RTC_SLOW_CLK_CAL_REG */
 #define WDTCONFIG0	0x98
 #define WDTCONFIG1	0x9c
 #define WDTFEED		0xac
@@ -25,13 +27,13 @@
 
 #define STG_RESET_RTC	4
 #define RESET_LEN_3_2US	7
-/* RC_SLOW, what the firmware runs the RTC from; it is only roughly 136 kHz */
+/* RC_SLOW is only roughly 136 kHz; the firmware measures it at boot */
 #define SLOW_CLK_HZ	136000
-#define MAX_TIMEOUT	(U32_MAX / SLOW_CLK_HZ)
 
 struct esp32s3_wdt {
 	struct watchdog_device wdd;
 	struct regmap *rtc;
+	u32 hz;
 };
 
 static void unlocked(struct esp32s3_wdt *w, unsigned int reg, unsigned int val)
@@ -53,7 +55,8 @@ static int esp32s3_wdt_start(struct watchdog_device *wdd)
 
 	regmap_write(w->rtc, WDTWPROTECT, WDT_WKEY);
 	regmap_write(w->rtc, WDTCONFIG0, 0);
-	regmap_write(w->rtc, WDTCONFIG1, wdd->timeout * SLOW_CLK_HZ);
+	/* stage 0 counts two slow clock cycles per step, as ESP-IDF's ticks >> 1 */
+	regmap_write(w->rtc, WDTCONFIG1, wdd->timeout * (w->hz / 2));
 	regmap_write(w->rtc, WDTFEED, WDT_FEED);
 	regmap_write(w->rtc, WDTCONFIG0, WDT_EN | WDT_STG0(STG_RESET_RTC) |
 		     WDT_CPU_RESET_LEN(RESET_LEN_3_2US) | WDT_SYS_RESET_LEN(RESET_LEN_3_2US));
@@ -101,13 +104,20 @@ static int esp32s3_wdt_probe(struct platform_device *pdev)
 	if (IS_ERR(w->rtc))
 		return dev_err_probe(dev, PTR_ERR(w->rtc), "no rtc regmap\n");
 
+	/* microseconds per tick, 19 fraction bits; 0 or nonsense: the nominal */
+	regmap_read(w->rtc, STORE1, &cfg);
+	w->hz = cfg ? div_u64(1000000ULL << 19, cfg) : 0;
+	if (w->hz < 10000 || w->hz > 200000)
+		w->hz = SLOW_CLK_HZ;
+
 	w->wdd.info = &esp32s3_wdt_info;
 	w->wdd.ops = &esp32s3_wdt_ops;
 	w->wdd.parent = dev;
 	w->wdd.min_timeout = 1;
-	w->wdd.max_timeout = MAX_TIMEOUT;
+	w->wdd.max_timeout = U32_MAX / (w->hz / 2);
 	w->wdd.timeout = 30;
 	watchdog_init_timeout(&w->wdd, 0, dev);
+	dev_info(dev, "slow clock %u Hz, %u s\n", w->hz, w->wdd.timeout);
 	watchdog_set_drvdata(&w->wdd, w);
 	watchdog_stop_on_reboot(&w->wdd);
 
